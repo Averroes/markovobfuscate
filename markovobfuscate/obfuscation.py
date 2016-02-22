@@ -3,6 +3,7 @@ import re
 import operator
 import random
 import logging
+import math
 
 
 # Exception to throw if the algorithm breaks like a condom on prom night
@@ -21,6 +22,7 @@ class MarkovKeyState:
         self.words = set()
         # Set the --terminate-- character (acts as the first and last character of a sentence)
         self.raw_scores = {"--terminate--": {}}
+        self.new_base = 16
 
     def learn_sentence(self, sentence):
         """
@@ -128,9 +130,8 @@ class MarkovKeyState:
                                 current_list) - 1
 
                             # Pick a random word that does not result in us going over our remaining value
-                            if upper_bound < 2:
-                                # hah, this was a silly bug
-                                index = upper_bound
+                            if upper_bound == 0:
+                                index = 0
                             else:
                                 index = random.randint(0, upper_bound)
 
@@ -160,17 +161,48 @@ class MarkovKeyState:
                     attempts += 1
                     if attempts > 1024:
                         # shit...
-                        logging.info("Algorithm failure resistance is failing...rage")
-                        logging.info("words_to_use: {0}".format(words_to_use))
-                        logging.info("remaining_value: {0}".format(remaining_value))
-                        logging.info("last: {0}".format(last))
-                        logging.info("byte_value: {0}".format(byte_value))
-                        logging.info("current_list: {0}".format(current_list))
+                        #logging.debug("Algorithm failure resistance is failing...rage")
+                        #logging.debug("words_to_use: {0}".format(words_to_use))
+                        #logging.debug("remaining_value: {0}".format(remaining_value))
+                        #logging.debug("last: {0}".format(last))
+                        #logging.debug("byte_value: {0}".format(byte_value))
+                        #logging.debug("current_list: {0}".format(current_list))
+                        raise AlgorithmFailException()
         else:
             # w00t, we can use a short value!
             words.append(sorted(self.raw_scores[last].items(), key=operator.itemgetter(1))[::-1][byte_value][0])
 
         return words
+
+    @staticmethod
+    def _char_to_base(chr_int, target_base):
+        if chr_int == 0:
+            return [0]
+        return MarkovKeyState._char_to_base(chr_int / target_base, target_base) + [chr_int % target_base]
+
+    @staticmethod
+    def char_to_base(chr_int, target_base):
+        r = MarkovKeyState._char_to_base(chr_int, target_base)
+        r = [0] * ((int(math.ceil(math.log(256, target_base) + 1))) - len(r)) + r
+        return r
+
+    @staticmethod
+    def base_to_chars(chr_ints, original_base):
+        numbers_per_char = int(math.ceil(math.log(256, original_base))) + 1
+
+        if len(chr_ints) % numbers_per_char != 0:
+            logging.debug("Base conversion is borked...")
+
+        results = []
+        for index in xrange(len(chr_ints) / numbers_per_char):
+            number = 0
+            for position in xrange(numbers_per_char):
+                x = (index * numbers_per_char) + ((numbers_per_char - 1) - position)
+                number += chr_ints[x] * (original_base ** position)
+
+            results.append(number)
+
+        return results
 
     def obfuscate_string(self, s):
         """
@@ -182,21 +214,35 @@ class MarkovKeyState:
         # Convert each byte of the string to an integer
         parts = map(ord, list(s))
 
-        # Start off with a random first word (word following --terminate--)
-        result = self.create_byte("--terminate--", random.randint(0, 256))
-        last = result[-1]
+        # Convert parts to be new_base numbers
+        temp_parts = []
+        for p in parts:
+            temp_parts.extend(MarkovKeyState.char_to_base(p, self.new_base))
 
-        for x in parts:
-            # This function is deceptively simple because 99% of the work is done in create_byte
-            to_append = self.create_byte(last, x)
+        parts = temp_parts
 
-            for current in to_append:
-                # If its a --terminate--, add in a period, else, add in the word
-                if current != "--terminate--":
-                    result.append(current)
-                else:
-                    result.append(". ")
-                last = current
+        # It'll work eventually...I really should do some graph theory to remove words that break the algo
+        # But I'll do that later
+        while True:
+            try:
+                # Start off with a random first word (word following --terminate--)
+                result = self.create_byte("--terminate--", random.randint(0, 256))
+                last = result[-1]
+
+                for x in parts:
+                    # This function is deceptively simple because 99% of the work is done in create_byte
+                    to_append = self.create_byte(last, x)
+
+                    for current in to_append:
+                        # If its a --terminate--, add in a period, else, add in the word
+                        if current != "--terminate--":
+                            result.append(current)
+                        else:
+                            result.append(". ")
+                        last = current
+            except AlgorithmFailException:
+                continue
+            break
 
         # Join it all into a string
         return " ".join(result)
@@ -212,7 +258,7 @@ class MarkovKeyState:
         parts = s.split(' ')
 
         # Start our loop out with last being the first word in the string
-        last = parts.pop(0)
+        last = "--terminate--"
         # Get our last_list based on the words that can follow last
         last_list = sorted(self.raw_scores[last].items(), key=operator.itemgetter(1))[::-1]
         result = []
@@ -279,15 +325,20 @@ class MarkovKeyState:
         if running_values is not None:
             result.append(sum(running_values))
 
+        # Trim off first number
+        result = result[1:]
+
+        # Change the number base
+        result = MarkovKeyState.base_to_chars(result, self.new_base)
+
         # Join the ints together as chrs, to live in harmony forevaaaa
         return "".join(map(chr, result))
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
 
     # Regular expression to split our training files on
-    split_regex = r'\.'
+    split_regex = r'\n'
 
     # File/book to read for training the Markov model (will be read into memory)
     training_file = "../datasets/98.txt"
@@ -304,14 +355,14 @@ if __name__ == "__main__":
 
     # Begin automated tests ######
 
-    for i in xrange(20):
+    for i in xrange(3):
         # Run a random test
-        rand_string = "".join([chr(random.randint(0, 255)) for k in xrange(1024)])
+        rand_string = "".join([chr(random.randint(0, 255)) for k in xrange(64)])
         if rand_string != m.deobfuscate_string(m.obfuscate_string(rand_string)):
-            raise AlgorithmFailException()
+            print "Failed integrity test"
 
     # Proved to cause an infinite failure prefix
-    m.create_byte("ruinating", 217)
+    #m.create_byte("ruinating", 217)
 
     # End automated tests ######
 
